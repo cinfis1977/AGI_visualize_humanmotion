@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local config/secrets
+.env
+.env.*
+*.local
+
+# Data and generated artifacts
+data/raw/**
+data/processed/**
+data/amass_npz/
+outputs/
+tmp/
+*.pt
+*.pth
+*.ckpt
+*.zip
+*.pkl
+*.joblib
+
+# Keep placeholders
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!outputs/.gitkeep
+
+# Paper build intermediates
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.bbl
+paper/*.blg
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+
+# Mini amass (derived, can be rebuilt)
+data/mini_amass/
+
+# SMPL model files (large pickle files)
+SMPL_python_v.1.1.0/
+
+# Cloned repos (clone separately)
+repos/

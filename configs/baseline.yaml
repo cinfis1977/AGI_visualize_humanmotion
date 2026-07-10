@@ -1,0 +1,4 @@
+stage: stage1_ball_trajectory_baseline
+n_steps: null
+coordinate_dim: 3
+baseline: linear_endpoint

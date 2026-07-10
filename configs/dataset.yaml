@@ -1,0 +1,9 @@
+# Fill this after Stage 0 data/license audit.
+source_name: unknown
+source_url: ""
+raw_redistributable: false
+coordinate_type: unknown  # metric_3d | calibrated_2d | video_only | estimated_3d
+frame_rate_hz: null
+trajectory_key: trajectories
+context_key: context
+notes: ""
