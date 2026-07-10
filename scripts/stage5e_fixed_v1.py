@@ -25,9 +25,12 @@ Array = np.ndarray
 # Data loader — same as stage5e
 # ════════════════════════════════════════════════════════════
 
-def load_data(data_dir, n_files=200, n_frames=96, min_translation=1.0, seed=42):
+def load_data(data_dir, n_files=200, n_frames=96, min_translation=1.0, seed=42, subject=None):
     base = Path(data_dir)
-    all_files = list(base.rglob("Walk*.npz"))
+    if subject:
+        base = base / subject
+        print(f"Loading subject {subject} from {base}")
+    all_files = [f for f in base.rglob("*.npz") if "walk" in f.name.lower()]
     rng = np.random.default_rng(seed)
     sequences = []
     for f in all_files:
@@ -334,7 +337,7 @@ def generate_motion(model, bases, start, goal, trans, x_scaler=None, y_scaler=No
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--data-dir", default="C:/Dropbox/projects/AGI_visualize_humanmotion/data/amass_npz")
+    p.add_argument("--data-dir", default="/content/drive/MyDrive/amass_npz")
     p.add_argument("--n-files", type=int, default=200)
     p.add_argument("--n-base", type=int, default=10)
     p.add_argument("--n-frames", type=int, default=96)
@@ -342,16 +345,21 @@ def main():
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--device", default="cpu")
+    p.add_argument("--device", default="auto")
     p.add_argument("--fk-weight", type=float, default=30.0)
     p.add_argument("--animate", action="store_true", default=False, help="Generate animation GIF")
     p.add_argument("--scale", type=float, default=1.0, help="Residual amplitude scale (1.30 = Gen/True fix)")
     p.add_argument("--save-model", type=str, default=None, help="Save trained model to this path")
+    p.add_argument("--subject", type=str, default=None, help="KIT subject ID (e.g. 675=119 walks)")
     args = p.parse_args()
+
+    if args.device == "auto":
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[Stage5E-fixed] Device: {args.device}")
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     print("[Stage5E-fixed] Loading...")
-    data, J = load_data(args.data_dir, args.n_files, args.n_frames, seed=args.seed)
+    data, J = load_data(args.data_dir, args.n_files, args.n_frames, seed=args.seed, subject=args.subject)
 
     rng = np.random.default_rng(args.seed+1)
     perm = rng.permutation(len(data))

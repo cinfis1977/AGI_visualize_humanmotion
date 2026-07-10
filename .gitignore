@@ -22,6 +22,7 @@ data/processed/**
 data/amass_npz/
 outputs/
 tmp/
+!tmp/smpl_neutral.npz
 *.pt
 *.pth
 *.ckpt
