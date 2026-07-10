@@ -22,7 +22,7 @@ Array = np.ndarray
 
 def load_data(data_dir, n_files=200, n_frames=96, min_translation=1.0, seed=42):
     base = Path(data_dir)
-    all_files = list(base.rglob("Walk*.npz"))
+    all_files = [f for f in base.rglob("*.npz") if "walk" in f.name.lower()]
     rng = np.random.default_rng(seed)
     sequences = []
     for f in all_files:
@@ -89,7 +89,7 @@ class BaseballVertexMDN(nn.Module):
         self.joint_encoder = nn.Sequential(nn.Linear(15, feature_dim), nn.GELU(), nn.Linear(feature_dim, feature_dim))
         self.attn = nn.MultiheadAttention(embed_dim=feature_dim, num_heads=4, batch_first=True)
         # Bidirectional LSTM over time (processes each joint independently)
-        self.lstm = nn.LSTM(feature_dim*2, hidden_dim, num_layers=2, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(feature_dim*2 + 4, hidden_dim, num_layers=2, batch_first=True, bidirectional=True)
         # Per-joint per-timestep MDN heads
         lstm_out = hidden_dim * 2  # bidirectional
         self.mdn_heads = nn.ModuleList([
@@ -117,7 +117,17 @@ class BaseballVertexMDN(nn.Module):
         D = joint_feat.shape[-1]  # 2*feature_dim
         joint_feat_t = joint_feat.unsqueeze(2).expand(B, J, T, D)
         # LSTM over time: process each joint independently
-        x_lstm = joint_feat_t.reshape(B*J, T, D)
+        # Temporal phase encoding: sinusoidal position signal so LSTM
+        # sees DIFFERENT input at each timestep (critical fix).
+        # Without this, LSTM gets identical static input T times → useless.
+        t_norm = torch.linspace(0, 1, T, device=joint_feat.device, dtype=joint_feat.dtype)
+        phase = torch.stack([torch.sin(2*np.pi*t_norm), torch.cos(2*np.pi*t_norm),
+                            torch.sin(4*np.pi*t_norm), torch.cos(4*np.pi*t_norm)], dim=-1)  # (T, 4)
+        phase = phase.unsqueeze(0).unsqueeze(1).expand(B, J, T, 4)  # (B, J, T, 4)
+        # Concatenate phase to static features per timestep
+        joint_feat_t = torch.cat([joint_feat_t, phase], dim=-1)  # (B, J, T, D+4)
+        Dp = joint_feat_t.shape[-1]
+        x_lstm = joint_feat_t.reshape(B*J, T, Dp)
         out_lstm, _ = self.lstm(x_lstm)  # (B*J, T, 2*H)
         out_lstm = out_lstm.reshape(B, J, T, -1)  # (B, J, T, 2*H)
 
@@ -221,30 +231,36 @@ def train_model(model, data75, bases, epochs=200, bs=16, lr=1e-3, device="cpu",
             recon = (w*err).sum(-1).mean()
             gate = sum(F.cross_entropy(logits[:,j], win[:,j]) for j in range(J))/J
 
-            # FIX #2: FK 3D position loss (one sample per batch as regularizer)
-            mu_win_np = mu[0].gather(1, win[0].view(J,1,1,1).expand(J,1,T,3)).squeeze(1).detach().cpu().numpy()  # (J,T,3)
-            pred_rot_np = bl[b[0]] + mu_win_np.transpose(1,0,2)  # (T,J,3) = baseline(T,J,3) + residual(J,T,3).T
-            true_rot_np = rot_data[b[0]]  # (T,J,3)
-            p3d = fk_smpl_full(pred_rot_np.reshape(T,72).astype(np.float32), trans_data[b[0]].astype(np.float32))
-            t3d = fk_smpl_full(true_rot_np.reshape(T,72).astype(np.float32), trans_data[b[0]].astype(np.float32))
-            fk_loss = torch.tensor(np.mean((p3d-t3d)**2), dtype=torch.float32, device=device)
+            # FK 3D position loss — ALL batch samples (not just batch[0])
+            B_cur = len(b)
+            mu_win = mu.gather(2, win.view(B_cur, J, 1, 1, 1).expand(B_cur, J, 1, T, 3)).squeeze(2)  # (B,J,T,3)
+            pred_rot_all = BL[b] + mu_win.permute(0, 2, 1, 3)  # (B,T,J,3)
+            true_rot_all = R[b]  # (B,T,J,3)
+            fk_errors = []
+            for bi in range(B_cur):
+                pr = pred_rot_all[bi].reshape(T, 72).cpu().numpy().astype(np.float32)
+                tr_np = true_rot_all[bi].reshape(T, 72).cpu().numpy().astype(np.float32)
+                p3d = fk_smpl_full(pr, trans_data[b[bi]].astype(np.float32))
+                t3d = fk_smpl_full(tr_np, trans_data[b[bi]].astype(np.float32))
+                fk_errors.append(np.mean((p3d - t3d)**2))
+            fk_loss = torch.tensor(np.mean(fk_errors), dtype=torch.float32, device=device)
 
-            # --- Amplitude & dynamics auxiliary losses (anti-stiffness) ---
-            # Rotation amplitude matching: pushes Gen/True → 1.0
-            # Use FULL rotation (baseline + residual), not just residual
-            pred_std = np.std(pred_rot_np, axis=0)  # (J, 3) — temporal std per joint
-            true_std = np.std(true_rot_np, axis=0)  # (J, 3)
-            amp_loss = torch.tensor(np.mean((pred_std - true_std)**2), dtype=torch.float32, device=device)
+            # Amplitude matching — ALL batch samples
+            pred_rot_np = pred_rot_all.cpu().numpy()
+            true_rot_np = true_rot_all.cpu().numpy()
+            pred_amp = np.std(pred_rot_np, axis=1).mean()
+            true_amp = np.std(true_rot_np, axis=1).mean()
+            amp_loss = torch.tensor((pred_amp - true_amp)**2, dtype=torch.float32, device=device)
 
-            # Velocity matching: first temporal difference of rotation
-            pred_vel = pred_rot_np[1:, :, :] - pred_rot_np[:-1, :, :]  # (T-1, J, 3)
-            true_vel = true_rot_np[1:, :, :] - true_rot_np[:-1, :, :]
-            vel_loss = torch.tensor(np.mean((pred_vel - true_vel)**2), dtype=torch.float32, device=device)
+            # Velocity matching — ALL batch samples
+            pv = pred_rot_np[:, 1:, :, :] - pred_rot_np[:, :-1, :, :]
+            tv = true_rot_np[:, 1:, :, :] - true_rot_np[:, :-1, :, :]
+            vel_loss = torch.tensor(np.mean((pv - tv)**2), dtype=torch.float32, device=device)
 
-            # Acceleration matching: second temporal difference of rotation
-            pred_acc = pred_vel[1:, :, :] - pred_vel[:-1, :, :]  # (T-2, J, 3)
-            true_acc = true_vel[1:, :, :] - true_vel[:-1, :, :]
-            acc_loss = torch.tensor(np.mean((pred_acc - true_acc)**2), dtype=torch.float32, device=device)
+            # Acceleration matching — ALL batch samples
+            pa = pv[:, 1:, :, :] - pv[:, :-1, :, :]
+            ta = tv[:, 1:, :, :] - tv[:, :-1, :, :]
+            acc_loss = torch.tensor(np.mean((pa - ta)**2), dtype=torch.float32, device=device)
 
             loss = 100.0*recon + 0.1*gate + fk_loss_weight*fk_loss \
                  + 30.0*amp_loss + 5.0*vel_loss + 2.0*acc_loss
@@ -254,6 +270,7 @@ def train_model(model, data75, bases, epochs=200, bs=16, lr=1e-3, device="cpu",
             opt.step()
             total += loss.item()*len(b); cnt += len(b)
 
+        # Validation metrics — compute properly on val set
         model.eval()
         with torch.no_grad():
             vl, vm = model(Ss[vi], Gs[vi], actions[vi], Bf[vi])
@@ -263,9 +280,21 @@ def train_model(model, data75, bases, epochs=200, bs=16, lr=1e-3, device="cpu",
             vw2 = torch.full_like(ve, 0.05/(K-1))
             vw2.scatter_(-1, vw.unsqueeze(-1), 0.95)
             val_loss = (vw2*ve).sum(-1).mean().item()
-        
-        # Combined loss for model selection (includes amp matching)
-        combined_val = val_loss + 0.5*float(amp_loss) + 0.08*float(vel_loss) + 0.03*float(acc_loss)
+
+            # FK + amp/vel/acc on VALIDATION set (not training batch!)
+            mu_win_v = vm.gather(2, vw.view(len(vi), J, 1, 1, 1).expand(len(vi), J, 1, T, 3)).squeeze(2)
+            pred_val = BL[vi] + mu_win_v.permute(0, 2, 1, 3)
+            true_val = R[vi]
+            pv_np = pred_val.cpu().numpy(); tv_np = true_val.cpu().numpy()
+            val_amp = float(np.mean((np.std(pv_np, axis=1) - np.std(tv_np, axis=1))**2))
+            pv_v = pv_np[:, 1:, :, :] - pv_np[:, :-1, :, :]
+            tv_v = tv_np[:, 1:, :, :] - tv_np[:, :-1, :, :]
+            val_vel = float(np.mean((pv_v - tv_v)**2))
+            pa_v = pv_v[:, 1:, :, :] - pv_v[:, :-1, :, :]
+            ta_v = tv_v[:, 1:, :, :] - tv_v[:, :-1, :, :]
+            val_acc = float(np.mean((pa_v - ta_v)**2))
+
+        combined_val = val_loss + 0.5*val_amp + 0.08*val_vel + 0.03*val_acc
 
         if combined_val < best_val - 1e-7:
             best_val = combined_val

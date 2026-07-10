@@ -109,7 +109,7 @@ def load_data(data_dir, n_files=200, n_frames=96, min_translation=1.0, seed=42, 
         # Only load from specific subject subdirectory
         base = base / subject
         print(f"Loading subject {subject} from {base}")
-    all_files = [f for f in base.rglob("*.npz") if "walk" in f.name.lower()]
+    all_files = list(base.rglob("Walk*.npz"))
     rng = np.random.default_rng(seed)
     sequences = []
     for f in all_files:
